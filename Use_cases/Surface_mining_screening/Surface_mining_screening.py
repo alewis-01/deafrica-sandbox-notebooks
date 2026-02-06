@@ -25,7 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import xarray as xr
-from datacube.utils import geometry
+from odc.geo.geom import Geometry
 from deafrica_tools.bandindices import calculate_indices, dualpol_indices
 from deafrica_tools.datahandling import load_ard
 from deafrica_tools.plotting import map_shapefile, rgb
@@ -120,7 +120,7 @@ def load_vector_file(vector_file):
 
     gdf["geometry"] = gdf["geometry"].apply(convert_3D_geometry_to_2D)
     # Get geometry from GeoDataFrame
-    geom = geometry.Geometry(gdf.unary_union, gdf.crs)
+    geom = Geometry(gdf.unary_union, gdf.crs)
 
     # Plot the vector on an interactive map
     map_shapefile(gdf, attribute=gdf.columns[0], fillOpacity=0, weight=3)
