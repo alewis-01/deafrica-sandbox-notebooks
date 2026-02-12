@@ -391,7 +391,7 @@ def plot_possible_mining_map(
         cmap=ListedColormap(["Gold"]), add_colorbar=False
     )
     plt.legend([Patch(facecolor="Gold")], ["Possible Mining Site"], loc="upper left")
-    plt.title("Possible Mining Areas (Vegetation loss within buffered mining candidates)")
+    plt.title("Possible Mining Areas")
     if out_png:
         Path(out_png).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -530,8 +530,8 @@ def run_surface_mining_screening(
             )
             plt.title(f"Vegetation Loss Mask - {int(y)}")
             plt.axis("off")
-            plt.savefig(out_folder / f"veg_loss_{int(y)}.png", dpi=dpi, bbox_inches="tight")
-            plt.show()
+            # plt.savefig(out_folder / f"veg_loss_{int(y)}.png", dpi=dpi, bbox_inches="tight")
+            plt.close()
 
     # ---- Run pipeline ----
     out_dir = _ensure_dir(out_dir)
@@ -640,7 +640,7 @@ def run_surface_mining_screening(
             rgb(ds, index=[i], ax=ax)  # uses red/green/blue from gm_s2_annual
             ax.set_title(f"RGB Composite - {int(y)}")
             fig.savefig(rgb_out_dir / f"rgb_{int(y)}.png", dpi=dpi, bbox_inches="tight")
-            plt.show()
+            plt.close()
         else:
             # Sentinel-1 RGB using vv, vh, vh/vv (normalized by median)
             fig, ax = plt.subplots(figsize=(7, 7))
@@ -653,8 +653,7 @@ def run_surface_mining_screening(
             )
             ax.set_title(f"S1 RGB (vv, vh, vh/vv) - {int(y)}")
             fig.savefig(rgb_out_dir / f"s1_rgb_{int(y)}.png", dpi=dpi, bbox_inches="tight")
-            plt.show()
-
+            plt.close()
 
     # ---- Save figures at dpi=300 ----
     show_title_after("9) Saving figures (PNG, dpi=300)")
@@ -671,31 +670,19 @@ def run_surface_mining_screening(
         out_png=out_dir / "veg_loss_timeseries.png",
     )
 
-    plot_and_save_yearly_loss_panels(
-        veg_loss_bool,
-        out_png=out_dir / "veg_loss_yearly_panels.png",
-    )
+    # plot_and_save_yearly_loss_panels(
+    #     veg_loss_bool,
+    #     out_png=out_dir / "veg_loss_yearly_panels.png",
+    # )
 
-    if export_yearly_loss_pngs:
-        export_yearly_loss_pngs_local(
-            veg_loss_bool,
-            out_folder=out_dir / "yearly_veg_loss_pngs",
-        )
+    # if export_yearly_loss_pngs:
+    #     export_yearly_loss_pngs_local(
+    #         veg_loss_bool,
+    #         out_folder=out_dir / "yearly_veg_loss_pngs",
+    #     )
 
     show_title_after("Done ✅ Outputs written to:")
-    print(str(out_dir))
+    show_title_after('All outputs are saved in the result foler')
 
-    return {
-        "ds": ds,
-        "water_frequency_sum": water_frequency_sum,
-        "vegetation_loss_bool": veg_loss_bool,
-        "vegetation_loss_sum": veg_loss_sum,
-        "base_mining_mask": base_mining_mask,
-        "buffered_mining_mask": buffered_mining_mask,
-        "veg_loss_in_buffer_mask": veg_loss_in_buffer_mask,
-        "summary_by_year": df_yearly,
-        "summary_meta": df_meta,
-        "threshold_used": thr,
-        "out_dir": str(out_dir),
-    }
+    return
 
