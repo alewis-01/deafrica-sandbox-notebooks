@@ -359,9 +359,9 @@ def build_summary_table(
         {
             "year": years,
             "any_veg_loss_km2": loss_any_area,
-            "any_veg_loss_pct": (loss_any_area / total_area) * 100.0,
-            "veg_loss_in_mining_buffer_km2": loss_in_buffer_area,
-            "veg_loss_in_mining_buffer_pct": (loss_in_buffer_area / total_area) * 100.0,
+            "any_veg_loss_%": (loss_any_area / total_area) * 100.0,
+            "veg_loss_in_from_mining_km2": loss_in_buffer_area,
+            "veg_loss_in_from_mining_%": (loss_in_buffer_area / total_area) * 100.0,
         }
     )
     meta = pd.DataFrame(
