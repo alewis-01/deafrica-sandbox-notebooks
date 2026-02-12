@@ -158,6 +158,114 @@ def save_dataarray_geotiff(
     with rasterio.open(out_path, "w", **profile) as dst:
         dst.write(write_arr, 1)
 
+def plot_rgb_and_mining_veg_loss_by_year(
+    ds: xr.Dataset,
+    vegetation_loss_bool: xr.DataArray,          # (time, y, x) bool
+    veg_loss_in_buffer_mask: xr.DataArray,       # (y, x) 0/1 or bool
+    product: str = "s2",
+    out_png: str | Path | None = None,
+    dpi: int = 300,
+    max_years_in_legend: int | None = None,      # optional: cap legend size
+):
+    """
+    Reproduces the classic 2-panel figure:
+      (1) RGB plot from most recent composite image
+      (2) Vegetation loss from possible mining by year (colored overlays)
+    """
+
+    index = "NDVI" if product == "s2" else "RVI"
+
+    years = pd.to_datetime(vegetation_loss_bool.time.values).year
+    if len(years) < 2:
+        raise ValueError("Need at least 2 timesteps/years to plot vegetation loss by year.")
+
+    # Background image: first year index (grey)
+    background = ds[index].isel(time=0)
+
+    # Most recent RGB index = last timestep
+    last_i = len(years) - 1
+
+    # Boolean mask per year: veg loss AND within mining buffer
+    # Ensure boolean types
+    loss_any = vegetation_loss_bool.fillna(False).astype(bool)
+    
+    buf = veg_loss_in_buffer_mask
+    if buf.dtype != bool:
+        buf = (buf == 1)
+    buf = buf.fillna(False).astype(bool)
+    
+    # Broadcast buf (y,x) across time safely
+    loss_in_mining = loss_any & buf
+
+    # Build colors (repeatable and visible)
+    # Use Tableau colors like the original style (orange/green/red etc)
+    tableau = [
+        "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+        "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+        "#bcbd22", "#17becf"
+    ]
+    n = len(years)
+    colors = [tableau[i % len(tableau)] for i in range(n)]
+
+    # Create figure
+    fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+
+    # ---- LEFT: RGB most recent ----
+    ax0 = axes[0]
+    if product == "s2":
+        rgb(ds, index=[last_i], ax=ax0)
+    else:
+        med_s1 = ds[["vv", "vh", "vh/vv"]].median()
+        rgb(
+            (ds[["vv", "vh", "vh/vv"]] / med_s1),
+            bands=["vv", "vh", "vh/vv"],
+            index=[last_i],
+            ax=ax0,
+        )
+    ax0.set_title("RGB plot from most recent composite image")
+    ax0.set_axis_off()
+
+    # ---- RIGHT: background + yearly overlays ----
+    ax1 = axes[1]
+    background.plot.imshow(ax=ax1, cmap="Greys", add_colorbar=False)
+    ax1.set_axis_off()
+
+    # Legend items
+    legend_patches = []
+    legend_labels = []
+
+    # optional: cap legend years (e.g. if 20+ years)
+    year_indices = list(range(1, n))  # start from 1 (first year has no change)
+    if max_years_in_legend is not None and len(year_indices) > max_years_in_legend:
+        # keep most recent N years
+        year_indices = year_indices[-max_years_in_legend:]
+
+    # Plot each year overlay (like your screenshot)
+    for i in year_indices:
+        da = loss_in_mining.isel(time=i).where(loss_in_mining.isel(time=i) == True)
+        # If no pixels that year, skip
+        if int(da.fillna(False).sum().values) == 0:
+            continue
+
+        da.plot.imshow(
+            ax=ax1,
+            add_colorbar=False,
+            cmap=ListedColormap([colors[i]]),
+        )
+        legend_patches.append(Patch(facecolor=colors[i]))
+        legend_labels.append(str(int(years[i])))
+
+    ax1.legend(legend_patches, legend_labels, loc="upper left")
+    ax1.set_title(f"Vegetation Loss from Possible Mining from {int(years[0])} to {int(years[-1])}")
+
+    # Save
+    if out_png is not None:
+        out_png = Path(out_png)
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_png, dpi=dpi, bbox_inches="tight")
+
+    plt.show()
+    plt.close(fig)
 
 def save_time_stack_geotiffs(
     da_time: xr.DataArray,
@@ -397,6 +505,16 @@ def plot_possible_mining_map(
         plt.savefig(out_png, dpi=200, bbox_inches="tight")
     plt.show()
 
+    # plot_rgb_and_mining_veg_loss_by_year(
+    #     ds=ds,
+    #     vegetation_loss_bool=veg_loss_bool,
+    #     veg_loss_in_buffer_mask=veg_loss_in_buffer_mask,
+    #     product=product,
+    #     out_png=out_dir / "RGB_and_VegLoss_From_Mining.png",
+    #     dpi=dpi,
+    #     max_years_in_legend=12,  # optional; remove if you want all years
+    # )
+    # show_plot_after("Saved: RGB_and_VegLoss_From_Mining.png (two-panel figure)")
 
 def run_surface_mining_screening(
     vector_file: str,
@@ -410,17 +528,25 @@ def run_surface_mining_screening(
     export_yearly_loss_pngs: bool = True,
     dpi: int = 300,
     col_wrap: int = 6,
+    max_years_in_legend: int | None = 12,   # set None to show all
 ):
     """
     One-shot runner that:
       - loads AOI + imagery
       - computes vegetation loss + possible mining masks
-      - prints/labels outputs in notebook when displayed
       - exports CSV tables + GeoTIFF rasters
-      - saves key figures as PNG at dpi=300 (including year time-series)
+      - saves key figures as PNG at dpi=300 (including:
+            - Possible mining map
+            - Vegetation-loss time series
+            - 2-panel figure: RGB (most recent) + Veg loss from mining by year
+            - RGB per-year PNGs
+        )
+      - Notebook captions appear AFTER outputs (tables/plots)
     """
 
-    # ---- Notebook display helpers (local so function is self-contained) ---    
+    # ----------------------------
+    # Local helpers (caption AFTER)
+    # ----------------------------
     def plot_and_save_veg_loss_timeseries(
         ds: xr.Dataset,
         vegetation_loss_bool: xr.DataArray,
@@ -433,19 +559,13 @@ def run_surface_mining_screening(
         loss_any = vegetation_loss_bool.fillna(False).astype(np.uint8)
         loss_any_area = loss_any.sum(dim=["y", "x"]).values * pix_area
 
-        loss_in_buffer = (loss_any == 1) & (veg_loss_in_buffer_mask == 1)
+        buf = (veg_loss_in_buffer_mask == 1) if veg_loss_in_buffer_mask.dtype != bool else veg_loss_in_buffer_mask
+        loss_in_buffer = (loss_any == 1) & buf
         loss_in_buffer_area = loss_in_buffer.sum(dim=["y", "x"]).values * pix_area
-
-        show_title_after("Vegetation loss time series (and saved PNG at 300 dpi)")
 
         plt.figure(figsize=(11, 4))
         plt.plot(years, loss_any_area, marker="o", label="Any vegetation loss (km²)")
-        plt.plot(
-            years,
-            loss_in_buffer_area,
-            marker="^",
-            label="Veg loss in mining buffer (km²)",
-        )
+        plt.plot(years, loss_in_buffer_area, marker="^", label="Veg loss in mining buffer (km²)")
         plt.grid(True)
         plt.xlabel("Year")
         plt.ylabel("Area (km²)")
@@ -456,39 +576,7 @@ def run_surface_mining_screening(
         out_png.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out_png, dpi=dpi, bbox_inches="tight")
         plt.show()
-
-    def plot_and_save_yearly_loss_panels(
-        vegetation_loss_bool: xr.DataArray,
-        out_png: str | Path,
-    ):
-        years = pd.to_datetime(vegetation_loss_bool.time.values).year
-        n = len(years)
-        ncols = min(col_wrap, n)
-        nrows = int(np.ceil(n / ncols))
-
-        show_title_after("Yearly vegetation loss maps (and saved PNG at 300 dpi)")
-
-        fig, axes = plt.subplots(
-            nrows, ncols, figsize=(3.2 * ncols, 3.2 * nrows)
-        )
-        axes = np.atleast_1d(axes).ravel()
-
-        for i, y in enumerate(years):
-            ax = axes[i]
-            vegetation_loss_bool.isel(time=i).fillna(False).astype(np.uint8).plot.imshow(
-                ax=ax, add_colorbar=False
-            )
-            ax.set_title(str(int(y)))
-            ax.set_axis_off()
-
-        # Hide any extra axes
-        for j in range(i + 1, len(axes)):
-            axes[j].set_axis_off()
-
-        out_png = Path(out_png)
-        out_png.parent.mkdir(parents=True, exist_ok=True)
-        plt.savefig(out_png, dpi=dpi, bbox_inches="tight")
-        plt.show()
+        show_plot_after("Vegetation loss time series")
 
     def plot_possible_mining_map_local(
         ds: xr.Dataset,
@@ -498,110 +586,182 @@ def run_surface_mining_screening(
         index = "NDVI" if product == "s2" else "RVI"
         bg = ds[index].isel(time=0)
 
-        show_title_after("Possible mining map (and saved PNG at 300 dpi)")
-
         plt.figure(figsize=(12, 12))
         bg.plot.imshow(cmap="Greys", add_colorbar=False)
         veg_loss_in_buffer_mask.where(veg_loss_in_buffer_mask == 1).plot.imshow(
             cmap=ListedColormap(["Gold"]), add_colorbar=False
         )
         plt.legend([Patch(facecolor="Gold")], ["Possible Mining Site"], loc="upper left")
-        plt.title("Possible Mining Areas (Veg loss within buffered mining candidates)")
+        plt.title("Possible Vegetation Loss Areas (Mining Screening)")
 
         out_png = Path(out_png)
         out_png.parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(out_png, dpi=dpi, bbox_inches="tight")
         plt.show()
+        show_plot_after("Possible mining map")
 
-    def export_yearly_loss_pngs_local(
-        vegetation_loss_bool: xr.DataArray,
-        out_folder: str | Path,
+    def plot_rgb_and_mining_veg_loss_by_year(
+        ds: xr.Dataset,
+        vegetation_loss_bool: xr.DataArray,          # (time, y, x) bool-ish
+        veg_loss_in_buffer_mask: xr.DataArray,       # (y, x) 0/1 or bool
+        out_png: str | Path,
     ):
-        out_folder = Path(out_folder)
-        out_folder.mkdir(parents=True, exist_ok=True)
+        """
+        2-panel figure:
+          (1) RGB plot from most recent composite image
+          (2) Vegetation loss from possible mining by year (colored overlays)
+        """
+        index = "NDVI" if product == "s2" else "RVI"
+    
         years = pd.to_datetime(vegetation_loss_bool.time.values).year
+        if len(years) < 2:
+            raise ValueError("Need at least 2 years to plot vegetation loss by year.")
+    
+        background = ds[index].isel(time=0)
+        last_i = len(years) - 1
+    
+        # ---- FIX: boolean casting to avoid TypeError ----
+        loss_any = vegetation_loss_bool.fillna(False).astype(bool)
+    
+        buf = veg_loss_in_buffer_mask
+        if buf.dtype != bool:
+            buf = (buf == 1)
+        buf = buf.fillna(False).astype(bool)
+    
+        # Broadcast (y,x) buffer across (time,y,x)
+        loss_in_mining = loss_any & buf
+    
+        # Colors
+        tableau = [
+            "#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+            "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+            "#bcbd22", "#17becf"
+        ]
+        n = len(years)
+        colors = [tableau[i % len(tableau)] for i in range(n)]
+    
+        fig, axes = plt.subplots(1, 2, figsize=(20, 10))
+    
+        # LEFT: most recent RGB
+        ax0 = axes[0]
+        if product == "s2":
+            rgb(ds, index=[last_i], ax=ax0)
+        else:
+            med_s1 = ds[["vv", "vh", "vh/vv"]].median()
+            rgb(
+                (ds[["vv", "vh", "vh/vv"]] / med_s1),
+                bands=["vv", "vh", "vh/vv"],
+                index=[last_i],
+                ax=ax0,
+            )
+        ax0.set_title("RGB plot from most recent composite image")
+        ax0.set_axis_off()
+    
+        # RIGHT: background + yearly overlays
+        ax1 = axes[1]
+        background.plot.imshow(ax=ax1, cmap="Greys", add_colorbar=False)
+        ax1.set_axis_off()
+    
+        legend_patches, legend_labels = [], []
+    
+        year_indices = list(range(1, n))  # skip first year
+        if max_years_in_legend is not None and len(year_indices) > max_years_in_legend:
+            year_indices = year_indices[-max_years_in_legend:]
+    
+        for i in year_indices:
+            da = loss_in_mining.isel(time=i)
+            # skip empty years
+            if int(da.sum().values) == 0:
+                continue
+    
+            da.where(da).plot.imshow(
+                ax=ax1,
+                add_colorbar=False,
+                cmap=ListedColormap([colors[i]]),
+            )
+            legend_patches.append(Patch(facecolor=colors[i]))
+            legend_labels.append(str(int(years[i])))
+    
+        ax1.legend(legend_patches, legend_labels, loc="upper left")
+        ax1.set_title(f"Vegetation Loss from Possible Mining from {int(years[0])} to {int(years[-1])}")
+    
+        out_png = Path(out_png)
+        out_png.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out_png, dpi=dpi, bbox_inches="tight")
+    
+        plt.show()
+        plt.close(fig)
+        show_plot_after("Two-panel RGB + Vegetation loss from mining")
 
-        show_title_after("Saving one PNG per year (vegetation loss masks)")
+
+    def save_rgb_per_year_pngs(ds: xr.Dataset, out_folder: Path):
+        out_folder.mkdir(parents=True, exist_ok=True)
+        years = pd.to_datetime(ds.time.values).year
 
         for i, y in enumerate(years):
-            plt.figure(figsize=(7, 7))
-            vegetation_loss_bool.isel(time=i).fillna(False).astype(np.uint8).plot.imshow(
-                add_colorbar=False
-            )
-            plt.title(f"Vegetation Loss Mask - {int(y)}")
-            plt.axis("off")
-            # plt.savefig(out_folder / f"veg_loss_{int(y)}.png", dpi=dpi, bbox_inches="tight")
-            plt.close()
+            fig, ax = plt.subplots(figsize=(7, 7))
+            if product == "s2":
+                rgb(ds, index=[i], ax=ax)
+                ax.set_title(f"RGB Composite - {int(y)}")
+                fig.savefig(out_folder / f"rgb_{int(y)}.png", dpi=dpi, bbox_inches="tight")
+            else:
+                med_s1 = ds[["vv", "vh", "vh/vv"]].median()
+                rgb(
+                    (ds[["vv", "vh", "vh/vv"]] / med_s1),
+                    bands=["vv", "vh", "vh/vv"],
+                    index=[i],
+                    ax=ax,
+                )
+                ax.set_title(f"S1 RGB (vv, vh, vh/vv) - {int(y)}")
+                fig.savefig(out_folder / f"s1_rgb_{int(y)}.png", dpi=dpi, bbox_inches="tight")
 
-    # ---- Run pipeline ----
+            # plt.show()
+            plt.close(fig)
+
+        show_plot_after("Saved RGB composites per year (PNG, dpi=300)")
+
+    # ----------------------------
+    # Run pipeline
+    # ----------------------------
     out_dir = _ensure_dir(out_dir)
 
-    show_title_after("1) Loading AOI vector")
+    # 1) AOI
     gdf, geom = load_vector_file(vector_file)
+    show_plot_after("Loaded AOI vector (interactive preview may have been displayed)")
 
-    show_title_after("2) Loading imagery and WOfS")
-    ds, water_frequency_sum, mask = process_data(
-        gdf, geom, start_year, end_year, product=product
-    )
+    # 2) Data
+    ds, water_frequency_sum, mask = process_data(gdf, geom, start_year, end_year, product=product)
+    show_plot_after("Loaded imagery and water summary; applied AOI mask")
 
-    show_title_after("3) Calculating vegetation loss")
-    veg_loss_bool, veg_loss_sum, change, thr = calculate_vegetation_loss(
-        ds, product=product, threshold=threshold
-    )
+    # 3) Vegetation loss
+    veg_loss_bool, veg_loss_sum, change, thr = calculate_vegetation_loss(ds, product=product, threshold=threshold)
     show_title_after(f"Vegetation loss threshold used: {thr}")
 
-    show_title_after("4) Screening possible mining areas")
+    # 4) Mining masks
     base_mining_mask, buffered_mining_mask, veg_loss_in_buffer_mask = possible_mining_masks(
         veg_loss_sum, water_frequency_sum, ds, buffer_m=buffer_m
     )
+    show_title_after("Computed possible mining masks")
 
-    show_title_after("5) Building summary tables")
-    df_yearly, df_meta = build_summary_table(
-        ds, veg_loss_bool, veg_loss_in_buffer_mask, product=product
-    )
+    # 5) Tables
+    df_yearly, df_meta = build_summary_table(ds, veg_loss_bool, veg_loss_in_buffer_mask, product=product)
     show_df_after(df_meta, "Summary metadata (also saved to CSV)")
     show_df_after(df_yearly, "Summary by year (also saved to CSV)")
 
-    # ---- Export CSV ----
-    show_title_after("6) Exporting CSV tables")
+    # 6) Export CSV
     df_yearly.to_csv(out_dir / "surface_mining_summary_by_year.csv", index=False)
     df_meta.to_csv(out_dir / "surface_mining_summary_meta.csv", index=False)
+    show_title_after("Exported CSV tables to results folder")
 
-    # ---- Export GeoTIFFs ----
-    show_title_after("7) Exporting GeoTIFF outputs")
-    save_dataarray_geotiff(
-        water_frequency_sum.astype(np.float32),
-        out_dir / "water_frequency_sum.tif",
-        nodata=-9999.0,
-        dtype="float32",
-    )
-    save_dataarray_geotiff(
-        veg_loss_sum.astype(np.uint16),
-        out_dir / "vegetation_loss_sum.tif",
-        nodata=0,
-        dtype="uint16",
-    )
-    save_dataarray_geotiff(
-        base_mining_mask.astype(np.uint8),
-        out_dir / "possible_mining_base_mask.tif",
-        nodata=0,
-        dtype="uint8",
-    )
-    save_dataarray_geotiff(
-        buffered_mining_mask.astype(np.uint8),
-        out_dir / "possible_mining_buffer_mask.tif",
-        nodata=0,
-        dtype="uint8",
-    )
-    save_dataarray_geotiff(
-        veg_loss_in_buffer_mask.astype(np.uint8),
-        out_dir / "veg_loss_in_mining_buffer_mask.tif",
-        nodata=0,
-        dtype="uint8",
-    )
+    # 7) Export GeoTIFFs
+    save_dataarray_geotiff(water_frequency_sum.astype(np.float32), out_dir / "water_frequency_sum.tif", nodata=-9999.0, dtype="float32")
+    save_dataarray_geotiff(veg_loss_sum.astype(np.uint16), out_dir / "vegetation_loss_sum.tif", nodata=0, dtype="uint16")
+    save_dataarray_geotiff(base_mining_mask.astype(np.uint8), out_dir / "possible_mining_base_mask.tif", nodata=0, dtype="uint8")
+    save_dataarray_geotiff(buffered_mining_mask.astype(np.uint8), out_dir / "possible_mining_buffer_mask.tif", nodata=0, dtype="uint8")
+    save_dataarray_geotiff(veg_loss_in_buffer_mask.astype(np.uint8), out_dir / "veg_loss_in_mining_buffer_mask.tif", nodata=0, dtype="uint8")
+    show_title_after("Exported GeoTIFF outputs to results folder")
 
     if export_yearly_loss_geotiffs:
-        show_title_after("Exporting yearly vegetation loss masks as GeoTIFFs")
         save_time_stack_geotiffs(
             veg_loss_bool.fillna(False).astype(np.uint8),
             out_dir / "yearly_veg_loss_masks",
@@ -609,80 +769,35 @@ def run_surface_mining_screening(
             nodata=0,
             dtype="uint8",
         )
+        show_title_after("Exported yearly vegetation loss GeoTIFFs")
 
-    # ---- Quick-look RGB ----
-    show_title_after("8) Quick-look RGB composites")
-    
-    # Display (as before)
+    # 8) Quick-look RGB (display + save per-year)
     if product == "s2":
         rgb(ds, col="time", col_wrap=len(ds.time.values))
     else:
         med_s1 = ds[["vv", "vh", "vh/vv"]].median()
-        rgb(
-            ds[["vv", "vh", "vh/vv"]] / med_s1,
-            bands=["vv", "vh", "vh/vv"],
-            col="time",
-            col_wrap=len(ds.time.values),
-        )
-    
-    # NEW: Save each year’s RGB as an individual PNG (dpi=300)
-    show_title_after("Saving RGB composites per year (PNG, dpi=300)")
-    
-    rgb_out_dir = out_dir / "rgb_yearly_pngs"
-    rgb_out_dir.mkdir(parents=True, exist_ok=True)
-    
-    years = pd.to_datetime(ds.time.values).year
-    
-    for i, y in enumerate(years):
-        if product == "s2":
-            # Make a single-year RGB figure
-            fig, ax = plt.subplots(figsize=(7, 7))
-            rgb(ds, index=[i], ax=ax)  # uses red/green/blue from gm_s2_annual
-            ax.set_title(f"RGB Composite - {int(y)}")
-            fig.savefig(rgb_out_dir / f"rgb_{int(y)}.png", dpi=dpi, bbox_inches="tight")
-            plt.close()
-        else:
-            # Sentinel-1 RGB using vv, vh, vh/vv (normalized by median)
-            fig, ax = plt.subplots(figsize=(7, 7))
-            med_s1 = ds[["vv", "vh", "vh/vv"]].median()
-            rgb(
-                (ds[["vv", "vh", "vh/vv"]] / med_s1),
-                bands=["vv", "vh", "vh/vv"],
-                index=[i],
-                ax=ax,
-            )
-            ax.set_title(f"S1 RGB (vv, vh, vh/vv) - {int(y)}")
-            fig.savefig(rgb_out_dir / f"s1_rgb_{int(y)}.png", dpi=dpi, bbox_inches="tight")
-            plt.close()
+        rgb(ds[["vv", "vh", "vh/vv"]] / med_s1, bands=["vv", "vh", "vh/vv"], col="time", col_wrap=len(ds.time.values))
+    show_plot_after("Quick-look RGB composites (displayed)")
 
-    # ---- Save figures at dpi=300 ----
-    show_title_after("9) Saving figures (PNG, dpi=300)")
-    plot_possible_mining_map_local(
-        ds,
-        veg_loss_in_buffer_mask,
-        out_png=out_dir / "Possible_Mining.png",
+    save_rgb_per_year_pngs(ds, out_dir / "rgb_yearly_pngs")
+
+    # 9) Key figures
+    plot_possible_mining_map_local(ds, veg_loss_in_buffer_mask, out_png=out_dir / "Possible_Mining.png")
+    plot_and_save_veg_loss_timeseries(ds, veg_loss_bool, veg_loss_in_buffer_mask, out_png=out_dir / "veg_loss_timeseries.png")
+
+    # *** This is the missing figure from your screenshot ***
+    plot_rgb_and_mining_veg_loss_by_year(
+        ds=ds,
+        vegetation_loss_bool=veg_loss_bool,
+        veg_loss_in_buffer_mask=veg_loss_in_buffer_mask,
+        out_png=out_dir / "RGB_and_VegLoss_From_Mining.png",
     )
 
-    plot_and_save_veg_loss_timeseries(
-        ds,
-        veg_loss_bool,
-        veg_loss_in_buffer_mask,
-        out_png=out_dir / "veg_loss_timeseries.png",
-    )
 
-    # plot_and_save_yearly_loss_panels(
-    #     veg_loss_bool,
-    #     out_png=out_dir / "veg_loss_yearly_panels.png",
-    # )
-
-    # if export_yearly_loss_pngs:
-    #     export_yearly_loss_pngs_local(
-    #         veg_loss_bool,
-    #         out_folder=out_dir / "yearly_veg_loss_pngs",
-    #     )
-
-    show_title_after("Done ✅ Outputs written to:")
-    show_title_after('All outputs are saved in the result foler')
-
-    return
-
+    show_title_after("Done ✅ All outputs are saved in the results folder.")
+    return {
+        "out_dir": str(out_dir),
+        "summary_by_year": df_yearly,
+        "summary_meta": df_meta,
+        "threshold_used": thr,
+    }
